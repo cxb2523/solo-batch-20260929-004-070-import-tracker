@@ -4,12 +4,24 @@ through import statements
 """
 # Standard
 from types import ModuleType
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Hashable,
+    Iterable,
+    List,
+    Optional,
+    Set,
+    Tuple,
+    Union,
+)
 import dis
 import importlib
 import os
 import re
 import sys
+import threading
 
 # Local
 from . import constants
@@ -218,6 +230,137 @@ def track_module(
 
     log.debug("Final output: %s", deps_out)
     return deps_out
+
+
+## Hook Installation Strategy ##################################################
+
+
+class MetaPathHookRegistry:
+    """Explicit, thread-safe installation strategy for ``sys.meta_path`` hooks.
+
+    Installation is idempotent: installing the same key multiple times (from
+    any number of threads) registers the hook exactly once and simply bumps a
+    reference count. Uninstallation decrements the count and only removes the
+    hook once the last holder has uninstalled, at which point _all_ residual
+    instances of the hook are purged from ``sys.meta_path`` so no stale hooks
+    are left behind.
+    """
+
+    def __init__(self):
+        self._lock = threading.RLock()
+        self._entries = {}
+
+    def install(self, key: Hashable, hook_factory: Callable[[], Any]) -> Any:
+        """Install the hook for the given key exactly once.
+
+        Args:
+            key:  Hashable
+                Identity of the hook configuration. Concurrent or repeated
+                installs with the same key share a single hook instance.
+            hook_factory:  Callable[[], Any]
+                Zero-arg callable that builds a new hook. It is only invoked
+                when a fresh hook needs to be registered.
+
+        Returns:
+            hook:  Any
+                The registered hook instance (shared for a given key)
+        """
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is not None and entry.hook in sys.meta_path:
+                entry.refcount += 1
+                return entry.hook
+
+            # Either no entry exists or the hook was removed from meta_path
+            # externally. Build a fresh hook so that stale holders of a
+            # previous instance cannot unregister this one.
+            hook = hook_factory()
+            sys.meta_path.append(hook)
+            self._entries[key] = _MetaPathHookEntry(hook)
+            return hook
+
+    def uninstall(self, key: Hashable, hook: Any = None) -> bool:
+        """Release one reference to the hook for the given key.
+
+        Args:
+            key:  Hashable
+                The key the hook was installed under
+            hook:  Optional[Any]
+                If given, only uninstall when the registered hook is this
+                exact instance (guards against stale holders)
+
+        Returns:
+            uninstalled:  bool
+                True if a held reference was released, False otherwise
+        """
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None or (hook is not None and entry.hook is not hook):
+                return False
+            entry.refcount -= 1
+            if entry.refcount > 0:
+                return True
+
+            # Last reference released: purge all residual instances of the
+            # hook so nothing is left behind in sys.meta_path
+            sys.meta_path[:] = [
+                meta_hook for meta_hook in sys.meta_path if meta_hook is not entry.hook
+            ]
+            del self._entries[key]
+            return True
+
+    def is_installed(self, key: Hashable) -> bool:
+        """Check whether the hook for the given key is currently registered"""
+        with self._lock:
+            entry = self._entries.get(key)
+            return entry is not None and entry.hook in sys.meta_path
+
+    def clear(self):
+        """Remove all registered hooks and reset the registry"""
+        with self._lock:
+            hooks = {id(entry.hook) for entry in self._entries.values()}
+            sys.meta_path[:] = [
+                meta_hook for meta_hook in sys.meta_path if id(meta_hook) not in hooks
+            ]
+            self._entries.clear()
+
+
+class _MetaPathHookEntry:
+    """Bookkeeping for a single registered meta-path hook"""
+
+    __slots__ = ("hook", "refcount")
+
+    def __init__(self, hook: Any):
+        self.hook = hook
+        self.refcount = 1
+
+
+# The default registry and the currently injected installation strategy
+_default_hook_registry = MetaPathHookRegistry()
+_hook_registry = _default_hook_registry
+_hook_registry_lock = threading.RLock()
+
+
+def get_hook_registry() -> MetaPathHookRegistry:
+    """Resolve the currently injected hook installation strategy"""
+    return _hook_registry
+
+
+def set_hook_registry(
+    registry: Optional[MetaPathHookRegistry] = None,
+) -> MetaPathHookRegistry:
+    """Inject a custom hook installation strategy. Passing None resets to the
+    default shared registry.
+    """
+    global _hook_registry
+    with _hook_registry_lock:
+        _hook_registry = registry if registry is not None else _default_hook_registry
+        return _hook_registry
+
+
+def reset_hook_registry():
+    """Reset the hook installation strategy to the shared default registry"""
+    set_hook_registry(None)
 
 
 ## Private #####################################################################

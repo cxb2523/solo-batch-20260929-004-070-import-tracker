@@ -2,16 +2,25 @@
 This module implements a context manager which can be used to wrap import
 statements such that ModuleNotFound errors will be deferred until the module is
 used.
+
+The module is responsible only for exception construction and traceback
+assembly (building the lazy error objects and walking frames to find the
+importing module). The actual installation of the import hook into
+``sys.meta_path`` is delegated to the explicit, injectable hook installation
+strategy in ``import_tracker.import_tracker`` (see ``MetaPathHookRegistry``).
 """
 
 # Standard
 from contextlib import AbstractContextManager
 from functools import partial
 from types import ModuleType
-from typing import Callable, Optional, Set
+from typing import Callable, Hashable, Optional, Set
 import importlib.abc
 import importlib.util
 import sys
+
+# Local
+from .import_tracker import get_hook_registry
 
 ## Public ######################################################################
 
@@ -20,6 +29,7 @@ def lazy_import_errors(
     *,
     get_extras_modules: Optional[Callable[[], Set[str]]] = None,
     make_error_message: Optional[Callable[[str], str]] = None,
+    hook_registry=None,
 ):
     """Enable lazy import errors.
 
@@ -42,6 +52,10 @@ def lazy_import_errors(
             Optional callable that takes the name of the module which failed to
             import and returns an error message string to be used for the
             ModuleNotFoundError. (Mutually exclusive with get_extras_modules)
+        hook_registry:  Optional[MetaPathHookRegistry]
+            Optional explicit hook installation strategy. If omitted, the
+            currently injected shared registry is used (see
+            import_tracker.get_hook_registry).
     """
     if get_extras_modules is not None and make_error_message is not None:
         raise TypeError(
@@ -51,7 +65,7 @@ def lazy_import_errors(
     if get_extras_modules is not None:
         make_error_message = partial(_make_extras_import_error, get_extras_modules)
 
-    return _LazyImportErrorCtx(make_error_message)
+    return _LazyImportErrorCtx(make_error_message, hook_registry=hook_registry)
 
 
 ## Implementation Details ######################################################
@@ -105,29 +119,55 @@ def _make_extras_import_error(
 
 
 class _LazyImportErrorCtx(AbstractContextManager):
-    """This class implements the Context Manager version of lazy_import_errors"""
+    """This class implements the Context Manager version of lazy_import_errors.
 
-    def __init__(self, make_error_message: Optional[Callable[[str], str]]):
+    The installation of the meta-path finder is delegated to the injected
+    hook installation strategy which guarantees that concurrent and repeated
+    installations are idempotent and thread safe.
+    """
+
+    def __init__(
+        self,
+        make_error_message: Optional[Callable[[str], str]],
+        hook_registry=None,
+    ):
         """This class is always constructed inside of lazy_import_errors which
         acts as the context manager, so the __enter__ implementation lives in
         the constructor.
         """
+        self._registry = (
+            hook_registry if hook_registry is not None else get_hook_registry()
+        )
+        self._key = self._make_registry_key(make_error_message)
         self.finder = None
-        if sys.meta_path and not any(
-            getattr(finder, "owner_content", None) is self for finder in sys.meta_path
-        ):
-            self.finder = _LazyErrorMetaFinder(make_error_message, self)
-            sys.meta_path.append(self.finder)
+        if sys.meta_path:
+            self.finder = self._registry.install(
+                self._key,
+                lambda: _LazyErrorMetaFinder(make_error_message, self),
+            )
+
+    @staticmethod
+    def _make_registry_key(
+        make_error_message: Optional[Callable[[str], str]],
+    ) -> Hashable:
+        """Build the registry key for a given error message factory. Identical
+        configurations share a single installed finder.
+        """
+        try:
+            hash(make_error_message)
+            return (_LazyErrorMetaFinder, make_error_message)
+        except TypeError:
+            return (_LazyErrorMetaFinder, id(make_error_message))
 
     @staticmethod
     def __enter__():
         """Nothing to do in __enter__ since it's done in __init__"""
-        pass
 
     def __exit__(self, *_, **__):
         """On exit, ensure there are no lazy meta finders left"""
-        if self.finder in sys.meta_path:
-            sys.meta_path.remove(self.finder)
+        if self.finder is not None:
+            self._registry.uninstall(self._key, self.finder)
+            self.finder = None
 
 
 class _LazyErrorAttr(type):

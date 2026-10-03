@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>import_tracker 导入命中追踪</title>
+<style>
+  :root {
+    --bg: #0f1420;
+    --panel: #1a2132;
+    --panel-border: #2a3550;
+    --text: #e6ebf5;
+    --muted: #8b96ad;
+    --accent: #4f8cff;
+    --accent-2: #36c98e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 24px;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .subtitle { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+  .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  textarea {
+    width: 100%;
+    min-height: 110px;
+    margin-top: 10px;
+    background: #101828;
+    color: var(--text);
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    padding: 10px;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 12px;
+    resize: vertical;
+  }
+  button, .file-label {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    padding: 8px 16px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  button.secondary, .file-label { background: #2a3550; }
+  button.active { background: var(--accent-2); }
+  button:hover { filter: brightness(1.15); }
+  input[type="file"] { display: none; }
+  .stats { display: flex; gap: 16px; flex-wrap: wrap; }
+  .stat {
+    flex: 1;
+    min-width: 140px;
+    background: #101828;
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    padding: 12px 16px;
+  }
+  .stat .num { font-size: 26px; font-weight: 700; color: var(--accent); }
+  .stat .label { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--panel-border); }
+  th { color: var(--muted); cursor: pointer; user-select: none; white-space: nowrap; }
+  th:hover { color: var(--text); }
+  td.module { font-family: Consolas, "Courier New", monospace; }
+  .bar-wrap { background: #101828; border-radius: 4px; height: 14px; min-width: 120px; }
+  .bar {
+    height: 100%;
+    border-radius: 4px;
+    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    transition: width 0.25s ease;
+  }
+  .count { font-weight: 700; color: var(--accent-2); }
+  .flash { animation: flash 0.5s ease; }
+  @keyframes flash { from { background: #2a3550; } to { background: transparent; } }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 8px; line-height: 1.6; }
+  code { background: #101828; padding: 1px 6px; border-radius: 4px; font-size: 12px; }
+  .error { color: #ff6b6b; font-size: 12px; margin-top: 6px; min-height: 14px; }
+</style>
+</head>
+<body>
+
+<h1>import_tracker 导入命中追踪</h1>
+<div class="subtitle">按模块与触发次数查看导入命中 &middot; 支持 track_module JSON 输出与运行时命中计数</div>
+
+<div class="panel">
+  <div class="controls">
+    <label class="file-label">加载 JSON 文件<input id="fileInput" type="file" accept=".json,application/json"></label>
+    <button id="loadText">加载下方 JSON</button>
+    <button id="demoBtn" class="secondary">▶ 演示模式（录屏用）</button>
+    <button id="clearBtn" class="secondary">清空</button>
+  </div>
+  <textarea id="jsonInput" placeholder='粘贴 JSON，支持以下格式：
+1. track_module 输出：{"my_lib": ["yaml", "alog"]}
+2. 命中计数：{"my_lib": 5}
+3. 命中事件列表：["mod_a", "mod_a", "mod_b"]
+4. 对象列表：[{"module": "mod_a", "count": 3}]'></textarea>
+  <div class="error" id="errorMsg"></div>
+  <div class="hint">
+    生成数据：<code>python -m import_tracker --name your_library</code> 的输出可直接粘贴或保存为 .json 后加载。
+    演示模式会持续模拟导入命中事件，方便录屏展示。
+  </div>
+</div>
+
+<div class="stats">
+  <div class="stat"><div class="num" id="statModules">0</div><div class="label">模块数</div></div>
+  <div class="stat"><div class="num" id="statHits">0</div><div class="label">总触发次数</div></div>
+  <div class="stat"><div class="num" id="statTop">-</div><div class="label">最热模块</div></div>
+  <div class="stat"><div class="num" id="statLast">-</div><div class="label">最近命中</div></div>
+</div>
+
+<div class="panel" style="margin-top:16px;">
+  <table>
+    <thead>
+      <tr>
+        <th data-sort="module">模块 ⇅</th>
+        <th data-sort="count">触发次数 ⇅</th>
+        <th data-sort="last">最近触发 ⇅</th>
+        <th>占比</th>
+      </tr>
+    </thead>
+    <tbody id="tbody"></tbody>
+  </table>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  // state: Map<module, {count: number, last: number}>
+  var state = new Map();
+  var sortKey = "count";
+  var sortAsc = false;
+  var demoTimer = null;
+  var flashedRow = null;
+
+  var tbody = document.getElementById("tbody");
+  var errorMsg = document.getElementById("errorMsg");
+
+  function addHit(name, count) {
+    var entry = state.get(name) || { count: 0, last: 0 };
+    entry.count += count || 1;
+    entry.last = Date.now();
+    state.set(name, entry);
+    flashedRow = name;
+  }
+
+  function ingest(data) {
+    var i;
+    if (Array.isArray(data)) {
+      for (i = 0; i < data.length; i++) {
+        var item = data[i];
+        if (typeof item === "string") {
+          addHit(item, 1);
+        } else if (item && typeof item === "object" && item.module) {
+          addHit(item.module, item.count || 1);
+        }
+      }
+      return;
+    }
+    if (data && typeof data === "object") {
+      var keys = Object.keys(data);
+      for (i = 0; i < keys.length; i++) {
+        var val = data[keys[i]];
+        if (typeof val === "number") {
+          addHit(keys[i], val);
+        } else if (Array.isArray(val)) {
+          // track_module 输出：每个依赖计为一次命中
+          addHit(keys[i], Math.max(val.length, 1));
+          for (var j = 0; j < val.length; j++) {
+            var dep = typeof val[j] === "string" ? val[j] : null;
+            if (dep && dep.indexOf(keys[i]) !== 0) {
+              var depEntry = state.get(dep) || { count: 0, last: 0 };
+              if (depEntry.count === 0) {
+                depEntry.count = 1;
+                depEntry.last = Date.now();
+                state.set(dep, depEntry);
+              }
+            }
+          }
+        }
+      }
+      return;
+    }
+    throw new Error("无法识别的 JSON 结构");
+  }
+
+  function fmtTime(ts) {
+    if (!ts) { return "-"; }
+    var d = new Date(ts);
+    function pad(n) { return (n < 10 ? "0" : "") + n; }
+    return pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds());
+  }
+
+  function render() {
+    var rows = [];
+    state.forEach(function (v, k) { rows.push({ module: k, count: v.count, last: v.last }); });
+    rows.sort(function (a, b) {
+      var x = a[sortKey], y = b[sortKey];
+      var cmp = (typeof x === "string") ? x.localeCompare(y) : x - y;
+      return sortAsc ? cmp : -cmp;
+    });
+
+    var total = 0, top = null, lastTs = 0;
+    rows.forEach(function (r) {
+      total += r.count;
+      if (!top || r.count > top.count) { top = r; }
+      if (r.last > lastTs) { lastTs = r.last; }
+    });
+    var max = rows.length ? rows[0].count : 0;
+    rows.forEach(function (r) { if (r.count > max) { max = r.count; } });
+
+    document.getElementById("statModules").textContent = rows.length;
+    document.getElementById("statHits").textContent = total;
+    document.getElementById("statTop").textContent = top ? top.module : "-";
+    document.getElementById("statLast").textContent = fmtTime(lastTs);
+
+    var html = "";
+    rows.forEach(function (r) {
+      var pct = total ? (r.count / total * 100) : 0;
+      var width = max ? (r.count / max * 100) : 0;
+      var cls = (r.module === flashedRow) ? ' class="flash"' : "";
+      html += "<tr" + cls + ">" +
+        '<td class="module"></td>' +
+        '<td class="count">' + r.count + "</td>" +
+        "<td>" + fmtTime(r.last) + "</td>" +
+        '<td><div class="bar-wrap"><div class="bar" style="width:' + width.toFixed(1) + '%"></div></div>' +
+        '<span style="color:var(--muted);font-size:11px;">' + pct.toFixed(1) + "%</span></td>" +
+        "</tr>";
+    });
+    tbody.innerHTML = html;
+    // 安全写入模块名（避免 HTML 注入）
+    var cells = tbody.querySelectorAll("td.module");
+    for (var i = 0; i < cells.length; i++) {
+      cells[i].textContent = rows[i].module;
+    }
+    flashedRow = null;
+  }
+
+  function showError(msg) { errorMsg.textContent = msg || ""; }
+
+  function loadJsonText(text) {
+    showError("");
+    try {
+      ingest(JSON.parse(text));
+      render();
+    } catch (err) {
+      showError("JSON 解析失败：" + err.message);
+    }
+  }
+
+  document.getElementById("loadText").addEventListener("click", function () {
+    loadJsonText(document.getElementById("jsonInput").value);
+  });
+
+  document.getElementById("fileInput").addEventListener("change", function (ev) {
+    var file = ev.target.files[0];
+    if (!file) { return; }
+    var reader = new FileReader();
+    reader.onload = function () { loadJsonText(reader.result); };
+    reader.readAsText(file);
+  });
+
+  document.getElementById("clearBtn").addEventListener("click", function () {
+    state.clear();
+    render();
+  });
+
+  var demoModules = [
+    "my_lib", "my_lib.core", "my_lib.io", "my_lib.cli",
+    "yaml", "alog", "numpy", "pandas", "requests"
+  ];
+  document.getElementById("demoBtn").addEventListener("click", function () {
+    var btn = this;
+    if (demoTimer) {
+      clearInterval(demoTimer);
+      demoTimer = null;
+      btn.textContent = "▶ 演示模式（录屏用）";
+      btn.classList.remove("active");
+      return;
+    }
+    btn.textContent = "⏸ 停止演示";
+    btn.classList.add("active");
+    demoTimer = setInterval(function () {
+      var name = demoModules[Math.floor(Math.random() * demoModules.length)];
+      addHit(name, 1);
+      render();
+    }, 350);
+  });
+
+  Array.prototype.forEach.call(document.querySelectorAll("th[data-sort]"), function (th) {
+    th.addEventListener("click", function () {
+      var key = th.getAttribute("data-sort");
+      if (sortKey === key) { sortAsc = !sortAsc; } else { sortKey = key; sortAsc = false; }
+      render();
+    });
+  });
+
+  render();
+})();
+</script>
+</body>
+</html>
