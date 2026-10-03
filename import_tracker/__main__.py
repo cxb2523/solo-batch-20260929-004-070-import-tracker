@@ -22,6 +22,7 @@ import os
 
 # Local
 from .import_tracker import track_module
+from .log import configure_logging
 
 ## Main ########################################################################
 
@@ -100,11 +101,11 @@ def main():
         else (args.submodules if args.submodules else True)
     )
 
-    # Set the level on the shared logger
+    # Assemble the logging strategy with the requested level
     log_level = getattr(logging, args.log_level.upper(), None)
     if log_level is None:
         log_level = int(args.log_level)
-    logging.basicConfig(level=log_level)
+    configure_logging(log_level)
 
     # Perform the tracking and print out the output
     print(

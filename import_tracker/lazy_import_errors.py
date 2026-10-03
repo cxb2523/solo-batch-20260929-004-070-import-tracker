@@ -1,7 +1,10 @@
 """
 This module implements a context manager which can be used to wrap import
 statements such that ModuleNotFound errors will be deferred until the module is
-used.
+used. It is responsible only for constructing the deferred errors and
+assembling their tracebacks; the actual installation of the import hooks is
+delegated to the explicit context-injection strategy in
+:mod:`import_tracker.import_tracker`.
 """
 
 # Standard
@@ -13,6 +16,9 @@ import importlib.abc
 import importlib.util
 import sys
 
+# Local
+from .import_tracker import HookContext, get_hook_installer
+
 ## Public ######################################################################
 
 
@@ -20,6 +26,7 @@ def lazy_import_errors(
     *,
     get_extras_modules: Optional[Callable[[], Set[str]]] = None,
     make_error_message: Optional[Callable[[str], str]] = None,
+    hook_installer=None,
 ):
     """Enable lazy import errors.
 
@@ -42,6 +49,9 @@ def lazy_import_errors(
             Optional callable that takes the name of the module which failed to
             import and returns an error message string to be used for the
             ModuleNotFoundError. (Mutually exclusive with get_extras_modules)
+        hook_installer:  Optional[MetaPathHookInstaller]
+            Optional explicit hook installation strategy. If omitted, the
+            shared installer from import_tracker.import_tracker is used.
     """
     if get_extras_modules is not None and make_error_message is not None:
         raise TypeError(
@@ -51,7 +61,7 @@ def lazy_import_errors(
     if get_extras_modules is not None:
         make_error_message = partial(_make_extras_import_error, get_extras_modules)
 
-    return _LazyImportErrorCtx(make_error_message)
+    return _LazyImportErrorCtx(make_error_message, hook_installer)
 
 
 ## Implementation Details ######################################################
@@ -105,19 +115,36 @@ def _make_extras_import_error(
 
 
 class _LazyImportErrorCtx(AbstractContextManager):
-    """This class implements the Context Manager version of lazy_import_errors"""
+    """This class implements the Context Manager version of lazy_import_errors.
+    It builds the lazy error finder and delegates its installation to the
+    injected hook installation strategy.
+    """
 
-    def __init__(self, make_error_message: Optional[Callable[[str], str]]):
+    def __init__(
+        self,
+        make_error_message: Optional[Callable[[str], str]],
+        hook_installer=None,
+    ):
         """This class is always constructed inside of lazy_import_errors which
         acts as the context manager, so the __enter__ implementation lives in
         the constructor.
         """
-        self.finder = None
-        if sys.meta_path and not any(
-            getattr(finder, "owner_content", None) is self for finder in sys.meta_path
-        ):
-            self.finder = _LazyErrorMetaFinder(make_error_message, self)
-            sys.meta_path.append(self.finder)
+        self._installer = (
+            hook_installer if hook_installer is not None else get_hook_installer()
+        )
+        self.finder = _LazyErrorMetaFinder(make_error_message, self)
+        self._hook_context = HookContext(finders=[self.finder])
+        self.install()
+
+    def install(self) -> bool:
+        """Idempotently install this context's hooks. Returns True if the
+        hooks were newly registered by this call.
+        """
+        return self._installer.install(self._hook_context)
+
+    def uninstall(self) -> None:
+        """Uninstall this context's hooks, cleaning up any residuals"""
+        self._installer.uninstall(self._hook_context)
 
     @staticmethod
     def __enter__():
@@ -126,8 +153,7 @@ class _LazyImportErrorCtx(AbstractContextManager):
 
     def __exit__(self, *_, **__):
         """On exit, ensure there are no lazy meta finders left"""
-        if self.finder in sys.meta_path:
-            sys.meta_path.remove(self.finder)
+        self.uninstall()
 
 
 class _LazyErrorAttr(type):

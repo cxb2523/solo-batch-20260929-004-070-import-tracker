@@ -10,6 +10,7 @@ import importlib
 import os
 import re
 import sys
+import threading
 
 # Local
 from . import constants
@@ -218,6 +219,80 @@ def track_module(
 
     log.debug("Final output: %s", deps_out)
     return deps_out
+
+
+## Hook Installation ###########################################################
+
+
+class HookContext:
+    """Explicit, injectable context describing a set of import hooks.
+
+    A hook context is a plain value object that carries the meta path finders
+    (and any future hook types) to be injected into the import system. It holds
+    no installation state itself; installation is performed by a
+    :class:`MetaPathHookInstaller` strategy.
+    """
+
+    def __init__(self, finders: Optional[Iterable[Any]] = None):
+        self.finders: List[Any] = list(finders) if finders else []
+
+
+class MetaPathHookInstaller:
+    """Thread-safe, idempotent installation strategy for import hooks.
+
+    Installing the same :class:`HookContext` multiple times (including
+    concurrently from multiple threads) registers its hooks exactly once.
+    Uninstalling always removes every residual instance of the context's
+    hooks from ``sys.meta_path``.
+    """
+
+    def __init__(self):
+        self._lock = threading.RLock()
+
+    def install(self, context: HookContext) -> bool:
+        """Install the hooks held by the context. Returns True if any hook was
+        newly registered by this call.
+        """
+        newly_installed = False
+        with self._lock:
+            for finder in context.finders:
+                if finder not in sys.meta_path:
+                    sys.meta_path.append(finder)
+                    newly_installed = True
+        return newly_installed
+
+    def uninstall(self, context: HookContext) -> None:
+        """Uninstall the hooks held by the context, removing all residual
+        instances from ``sys.meta_path``.
+        """
+        with self._lock:
+            for finder in context.finders:
+                while finder in sys.meta_path:
+                    sys.meta_path.remove(finder)
+
+
+# The shared default installer strategy and a lock guarding strategy swaps
+_default_hook_installer = MetaPathHookInstaller()
+_installer_lock = threading.Lock()
+_active_hook_installer = _default_hook_installer
+
+
+def get_hook_installer() -> MetaPathHookInstaller:
+    """Get the currently active hook installation strategy"""
+    return _active_hook_installer
+
+
+def set_hook_installer(
+    installer: Optional[MetaPathHookInstaller],
+) -> MetaPathHookInstaller:
+    """Inject a custom hook installation strategy. Passing None restores the
+    default. Returns the previously active strategy.
+    """
+    global _active_hook_installer
+    with _installer_lock:
+        previous = _active_hook_installer
+        _active_hook_installer = installer if installer is not None else _default_hook_installer
+    return previous
 
 
 ## Private #####################################################################

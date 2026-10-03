@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>import_tracker · 导入命中追踪</title>
+<style>
+  :root {
+    --bg: #0f1419;
+    --panel: #1a2230;
+    --panel-2: #212b3b;
+    --text: #e6e9ef;
+    --muted: #8b95a7;
+    --accent: #4f9cf9;
+    --accent-2: #36c5a0;
+    --border: #2c3a4f;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  header {
+    padding: 18px 28px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    flex-wrap: wrap;
+  }
+  header h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  header .sub { color: var(--muted); font-size: 13px; }
+  main { padding: 20px 28px 48px; max-width: 1100px; margin: 0 auto; }
+  .toolbar {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    align-items: center;
+    margin-bottom: 18px;
+  }
+  button {
+    background: var(--panel-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 7px 14px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  input[type="text"] {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    padding: 7px 12px;
+    font-size: 13px;
+    min-width: 220px;
+  }
+  .stats { display: flex; gap: 14px; margin-bottom: 18px; flex-wrap: wrap; }
+  .stat {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 18px;
+    min-width: 140px;
+  }
+  .stat .num { font-size: 24px; font-weight: 700; color: var(--accent); }
+  .stat .lbl { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  table { width: 100%; border-collapse: collapse; background: var(--panel); border-radius: 8px; overflow: hidden; }
+  th, td { padding: 9px 14px; text-align: left; font-size: 13px; border-bottom: 1px solid var(--border); }
+  th {
+    background: var(--panel-2);
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+  }
+  th .arrow { color: var(--accent); margin-left: 4px; }
+  td.mod { font-family: Consolas, "Courier New", monospace; }
+  td.count { text-align: right; font-variant-numeric: tabular-nums; }
+  .bar-cell { width: 40%; }
+  .bar {
+    height: 10px;
+    border-radius: 5px;
+    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    min-width: 2px;
+    transition: width .25s ease;
+  }
+  tr:hover td { background: rgba(79, 156, 249, 0.07); }
+  .empty { color: var(--muted); text-align: center; padding: 40px 0; font-size: 14px; }
+  details {
+    margin-top: 26px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 18px;
+    font-size: 13px;
+  }
+  summary { cursor: pointer; color: var(--accent); font-weight: 600; }
+  pre {
+    background: var(--panel-2);
+    border-radius: 6px;
+    padding: 12px;
+    overflow-x: auto;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  textarea {
+    width: 100%;
+    min-height: 90px;
+    background: var(--panel-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-family: Consolas, monospace;
+    font-size: 12px;
+    padding: 8px;
+    margin-top: 8px;
+  }
+  .err { color: #f97583; font-size: 12px; margin-top: 6px; min-height: 14px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>import_tracker · 导入命中追踪</h1>
+  <span class="sub">按模块与触发次数查看导入命中 · 直接双击打开本文件即可使用</span>
+</header>
+<main>
+  <div class="toolbar">
+    <button class="primary" id="loadFileBtn">加载 JSON 追踪文件</button>
+    <input type="file" id="fileInput" accept=".json,application/json" style="display:none">
+    <button id="pasteBtn">粘贴 JSON</button>
+    <button id="demoBtn">载入示例数据</button>
+    <button id="clearBtn">清空</button>
+    <input type="text" id="filter" placeholder="按模块名过滤…">
+  </div>
+
+  <div class="stats">
+    <div class="stat"><div class="num" id="statModules">0</div><div class="lbl">模块数</div></div>
+    <div class="stat"><div class="num" id="statHits">0</div><div class="lbl">总命中次数</div></div>
+    <div class="stat"><div class="num" id="statTop">-</div><div class="lbl">最热模块</div></div>
+  </div>
+
+  <table id="hitTable">
+    <thead>
+      <tr>
+        <th data-key="module">模块 <span class="arrow" id="arrowModule"></span></th>
+        <th data-key="count">触发次数 <span class="arrow" id="arrowCount"></span></th>
+        <th>占比</th>
+      </tr>
+    </thead>
+    <tbody id="hitBody"></tbody>
+  </table>
+  <div class="empty" id="emptyHint">暂无数据 —— 加载 JSON 追踪文件，或点击「载入示例数据」预览。</div>
+
+  <details>
+    <summary>如何生成追踪 JSON</summary>
+    <p>在目标进程启动早期加入下面这段 meta path 钩子，退出时即得到 <code>import_trace.json</code>：</p>
+<pre>import atexit, collections, importlib.abc, json, threading
+
+_hits = collections.Counter()
+_lock = threading.Lock()
+
+class _TraceFinder(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        with _lock:
+            _hits[fullname] += 1
+        return None  # 只统计，不改变导入行为
+
+import sys
+sys.meta_path.insert(0, _TraceFinder())
+
+@atexit.register
+def _dump():
+    with open("import_trace.json", "w", encoding="utf-8") as fh:
+        json.dump(dict(_hits), fh, indent=2, ensure_ascii=False)</pre>
+    <p>支持的 JSON 格式：<code>{"模块名": 次数}</code>、<code>[{"module": "...", "count": n}]</code>，或模块名字符串数组（自动按出现次数聚合）。</p>
+    <div id="pasteArea" style="display:none">
+      <textarea id="pasteText" placeholder='在此粘贴 JSON，例如 {"numpy": 12, "yaml": 3}'></textarea>
+      <div class="err" id="pasteErr"></div>
+      <button class="primary" id="pasteApply">解析并载入</button>
+    </div>
+  </details>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  var hits = {};            // module -> count
+  var sortKey = "count";
+  var sortAsc = false;
+
+  var demoData = {
+    "numpy": 42, "numpy.core": 38, "yaml": 17, "alog": 9,
+    "conditional_deps": 6, "sample_lib.submod1": 4,
+    "import_tracker": 3, "typing_extensions": 2, "json": 1
+  };
+
+  function $(id) { return document.getElementById(id); }
+
+  function normalize(data) {
+    var out = {};
+    if (Array.isArray(data)) {
+      data.forEach(function (item) {
+        if (typeof item === "string") {
+          out[item] = (out[item] || 0) + 1;
+        } else if (item && typeof item === "object" && typeof item.module === "string") {
+          var n = typeof item.count === "number" ? item.count : 1;
+          out[item.module] = (out[item.module] || 0) + n;
+        }
+      });
+    } else if (data && typeof data === "object") {
+      Object.keys(data).forEach(function (key) {
+        var n = Number(data[key]);
+        if (!isNaN(n)) { out[key] = (out[key] || 0) + n; }
+      });
+    }
+    return out;
+  }
+
+  function loadData(data) {
+    var normalized = normalize(data);
+    Object.keys(normalized).forEach(function (mod) {
+      hits[mod] = (hits[mod] || 0) + normalized[mod];
+    });
+    render();
+  }
+
+  function render() {
+    var filter = $("filter").value.trim().toLowerCase();
+    var rows = Object.keys(hits)
+      .filter(function (m) { return !filter || m.toLowerCase().indexOf(filter) >= 0; })
+      .map(function (m) { return { module: m, count: hits[m] }; });
+
+    rows.sort(function (a, b) {
+      var cmp = sortKey === "count"
+        ? a.count - b.count
+        : (a.module < b.module ? -1 : a.module > b.module ? 1 : 0);
+      return sortAsc ? cmp : -cmp;
+    });
+
+    var totalModules = Object.keys(hits).length;
+    var totalHits = Object.keys(hits).reduce(function (s, m) { return s + hits[m]; }, 0);
+    var top = rows.length ? rows.reduce(function (a, b) { return a.count >= b.count ? a : b; }) : null;
+
+    $("statModules").textContent = totalModules;
+    $("statHits").textContent = totalHits;
+    $("statTop").textContent = top ? top.module : "-";
+
+    var max = rows.length ? Math.max.apply(null, rows.map(function (r) { return r.count; })) : 1;
+    var body = $("hitBody");
+    body.innerHTML = "";
+    rows.forEach(function (row) {
+      var tr = document.createElement("tr");
+      var pct = max ? Math.max(2, Math.round((row.count / max) * 100)) : 0;
+      tr.innerHTML =
+        '<td class="mod"></td>' +
+        '<td class="count">' + row.count + "</td>" +
+        '<td class="bar-cell"><div class="bar" style="width:' + pct + '%"></div></td>';
+      tr.children[0].textContent = row.module;
+      body.appendChild(tr);
+    });
+    $("emptyHint").style.display = rows.length ? "none" : "block";
+    $("hitTable").style.display = rows.length ? "" : "none";
+
+    $("arrowModule").textContent = sortKey === "module" ? (sortAsc ? "▲" : "▼") : "";
+    $("arrowCount").textContent = sortKey === "count" ? (sortAsc ? "▲" : "▼") : "";
+  }
+
+  document.querySelectorAll("#hitTable th").forEach(function (th) {
+    th.addEventListener("click", function () {
+      var key = th.getAttribute("data-key");
+      if (sortKey === key) { sortAsc = !sortAsc; } else { sortKey = key; sortAsc = key === "module"; }
+      render();
+    });
+  });
+
+  $("filter").addEventListener("input", render);
+  $("demoBtn").addEventListener("click", function () { loadData(demoData); });
+  $("clearBtn").addEventListener("click", function () { hits = {}; render(); });
+  $("loadFileBtn").addEventListener("click", function () { $("fileInput").click(); });
+  $("fileInput").addEventListener("change", function (ev) {
+    var file = ev.target.files[0];
+    if (!file) { return; }
+    var reader = new FileReader();
+    reader.onload = function () {
+      try { loadData(JSON.parse(reader.result)); }
+      catch (err) { alert("JSON 解析失败: " + err.message); }
+    };
+    reader.readAsText(file);
+    ev.target.value = "";
+  });
+  $("pasteBtn").addEventListener("click", function () {
+    var area = $("pasteArea");
+    area.style.display = area.style.display === "none" ? "block" : "none";
+    var details = area.closest("details");
+    if (details) { details.open = true; }
+  });
+  $("pasteApply").addEventListener("click", function () {
+    try {
+      loadData(JSON.parse($("pasteText").value));
+      $("pasteErr").textContent = "";
+      $("pasteText").value = "";
+    } catch (err) {
+      $("pasteErr").textContent = "JSON 解析失败: " + err.message;
+    }
+  });
+
+  render();
+})();
+</script>
+</body>
+</html>
